@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Scratch / temp
+scratch/
+tmp/
+*.tmp
+
+# Never commit credentials or AWS config
+.env
+*.pem
+*.key
+credentials
+.aws/
+
+# Claude Code local config
+.claude/

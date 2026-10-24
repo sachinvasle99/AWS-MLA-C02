@@ -14,6 +14,7 @@ This section is mostly **not AWS services** — it's general data engineering th
 9. [Amazon S3 – Performance](#9-amazon-s3--performance) — prefix limits, multi-part, Transfer Acceleration, byte-range fetches
 10. [Amazon S3 – Access Points](#10-amazon-s3--access-points) — simplifying security at scale, VPC origin
 11. [Amazon S3 – Object Lambda](#11-amazon-s3--object-lambda) — transform objects on the way out
+12. [Amazon FSx](#12-amazon-fsx) — Windows File Server, **Lustre (ML/HPC)**, NetApp ONTAP, OpenZFS
 
 > Note: only the lectures I didn't already know are written up here, so the numbering follows my notes, not the course's lecture numbers.
 
@@ -1234,6 +1235,175 @@ The pieces, in order:
 ---
 ---
 
+# 12. Amazon FSx
+
+*(Course lecture 42)*
+
+## 12.1 What FSx is
+
+> **FSx = run a third-party high-performance file system on AWS, fully managed.**
+
+The analogy the lecture gives is perfect:
+
+```
+RDS  →  run MySQL / PostgreSQL on AWS, managed for you
+FSx  →  run Lustre / Windows File Server / NetApp ONTAP / OpenZFS, managed for you
+         (the same idea, but for FILE SYSTEMS instead of databases)
+```
+
+**Four flavours to know** (more may exist, but these are the examinable ones):
+1. FSx for **Windows File Server**
+2. FSx for **Lustre** ← **the one that matters for machine learning**
+3. FSx for **NetApp ONTAP**
+4. FSx for **OpenZFS**
+
+---
+
+## 12.2 FSx for Lustre — ⭐ the ML one
+
+**Learn the name and the meaning clicks:**
+
+```
+Lustre  =  Linux  +  Cluster
+```
+
+A **distributed file system for large-scale computing**.
+
+> 🔑 **The exam keywords: "machine learning" and "high-performance computing (HPC)" → FSx for Lustre.**
+
+**Other use cases:** video processing, financial modelling, electronic design automation.
+
+**Performance — massive scale:**
+- Hundreds of **GB/s** throughput
+- **Millions of IOPS**
+- **Sub-millisecond** latency
+
+**Storage options:**
+
+| Option | For |
+|---|---|
+| **SSD** | Low latency, IOPS-intensive, **small and random** file operations (more expensive) |
+| **HDD** | Throughput-intensive, **large and sequential** file operations (cheaper) |
+
+**Seamless S3 integration** — this is the part the exam asks about:
+
+```
+   Amazon S3  ◄──────────────────►  FSx for Lustre  ◄────►  compute
+      │                                   │
+   read S3 as if it were                write the results of your
+   a file system                        computation back to S3
+```
+
+> For us: this is why FSx for Lustre appears in SageMaker questions. Your training data sits in S3, but repeatedly reading it over many epochs is slow — FSx for Lustre links to the S3 bucket and serves it as a fast file system.
+
+**On-premises access:** possible via **VPN or Direct Connect**.
+
+### Deployment options — Scratch vs Persistent
+
+This comparison is very likely to be tested:
+
+| | **Scratch** | **Persistent** |
+|---|---|---|
+| Purpose | **Temporary** storage | **Long-term** storage |
+| Replication | **None** — only **one copy** of the data | Replicated **within the same AZ** — **two copies** |
+| If a server fails | **You lose the data** | File is **replaced transparently within minutes** |
+| Performance | **6× the performance** of persistent; bursts up to **200 MB/s per TB** | Standard |
+| Use case | **Short-term** processing, optimise cost by not replicating | **Long-term** processing and storage of sensitive data |
+
+```
+SCRATCH:                          PERSISTENT:
+  AZ1 ──┐                           AZ1 ──┐
+        ├──► [ 1 copy ]                   ├──► [ copy 1 ] ⇄ [ copy 2 ]
+  AZ2 ──┘    no replication          AZ2 ──┘    replicated within the SAME AZ
+```
+
+> ⚠️ **Important:** an FSx for Lustre file system lives in **one single AZ**. Persistent mode replicates **within** that AZ, **not across AZs**. Easy trap.
+
+Both can optionally have an **S3 bucket underneath as the data repository**.
+
+---
+
+## 12.3 FSx for Windows File Server
+
+A fully managed **Windows file share drive**.
+
+| Feature | Detail |
+|---|---|
+| **Protocols** | **SMB** and **Windows NTFS** |
+| **Security** | Integrates with **Microsoft Active Directory**, supports **ACLs** and **user quotas** |
+| **Mountable on** | Windows **and — remember this — Linux EC2 instances too** |
+| **On-prem linking** | Use **Microsoft DFS** (Distributed File System) to group it with an existing on-prem Windows File Server |
+| **Performance** | Tens of **GB/s**, millions of IOPS, hundreds of **PB** |
+| **High availability** | Can be configured **Multi-AZ** |
+| **Backups** | **Daily backup to Amazon S3** for disaster recovery |
+| **On-prem access** | Via private connection |
+
+**Storage options:**
+
+| Option | For |
+|---|---|
+| **SSD** | Latency-sensitive workloads — databases, media processing, data analytics |
+| **HDD** | Broad spectrum, cheaper — home directories, CMS |
+
+> **Trap:** despite the name, FSx for Windows File Server **can be mounted on Linux EC2 instances**. If an option says "Windows only", it's wrong.
+
+---
+
+## 12.4 FSx for NetApp ONTAP
+
+A managed **NetApp ONTAP** file system on AWS.
+
+**Why it exists:** to **move workloads already running on ONTAP or an on-premises NAS into AWS**.
+
+| Feature | Detail |
+|---|---|
+| **Protocols** | **NFS, SMB, and iSCSI** (the widest protocol support) |
+| **Compatibility** | **Very broad** — Linux, Windows, macOS, VMware Cloud on AWS, WorkSpaces, AppStream, EC2, ECS, EKS |
+| **Auto-scaling** | Storage **automatically shrinks or grows** |
+| **Features** | Replication, snapshots, data **compression**, **data de-duplication**, low cost |
+| **Cloning** | **Point-in-time instantaneous cloning** — clone the file system quickly to create a staging/test environment |
+
+> **The unique feature to remember: NetApp ONTAP is the one with data DE-DUPLICATION.**
+
+---
+
+## 12.5 FSx for OpenZFS
+
+A managed **OpenZFS** file system on AWS.
+
+**Why it exists:** to **move workloads already running on ZFS into AWS**.
+
+| Feature | Detail |
+|---|---|
+| **Protocol** | **NFS only** (multiple versions) |
+| **Compatibility** | Broad — Linux, macOS, Windows |
+| **Performance** | Up to **1 million IOPS** with **< 0.5 ms latency** |
+| **Features** | Snapshots, compression, low cost |
+| **De-duplication** | ❌ **No** — unlike NetApp ONTAP |
+| **Cloning** | ✅ Point-in-time instantaneous cloning |
+
+---
+
+## 12.6 Choosing between them — the decision table
+
+| If the question says… | Answer |
+|---|---|
+| **Machine learning**, **HPC**, large-scale computing, video processing, financial modelling | **FSx for Lustre** |
+| Windows, **SMB**, **NTFS**, **Active Directory** integration | **FSx for Windows File Server** |
+| Already using **NetApp ONTAP** or an on-prem **NAS**; needs **iSCSI**; needs **de-duplication** | **FSx for NetApp ONTAP** |
+| Already using **ZFS**; **NFS only**; very high IOPS at low latency | **FSx for OpenZFS** |
+
+**The fastest way to separate ONTAP from OpenZFS:**
+
+| | NetApp ONTAP | OpenZFS |
+|---|---|---|
+| Protocols | NFS, SMB, **iSCSI** | **NFS only** |
+| De-duplication | ✅ **Yes** | ❌ No |
+| Coming from | ONTAP / NAS | ZFS |
+
+---
+---
+
 # Things to note (Section 2 exam traps)
 
 **Types of data**
@@ -1349,3 +1519,17 @@ The pieces, in order:
 - Classic use cases: **redact PII**, convert XML↔JSON, enrich with other data, resize/watermark images.
 - If an answer says "create a second bucket with a redacted copy", Object Lambda is the better answer — **one copy, no sync problem**.
 - Access Point = *who can get in*. **Object Lambda Access Point = what they see when they do.**
+
+**Amazon FSx**
+- **FSx is to file systems what RDS is to databases** — managed third-party software.
+- ⭐ **"Machine learning" or "HPC" in a question → FSx for Lustre.** This is the single most important FSx fact for this exam.
+- **Lustre = Linux + Cluster.**
+- **Lustre ⇄ S3 integration**: read S3 as a file system, write results back to S3. Explicitly called out as exam material.
+- **Scratch vs Persistent:** scratch = **no replication, 1 copy, data lost on failure, 6× faster**. Persistent = **replicated, 2 copies, auto-repaired in minutes**.
+- Persistent replicates **within the same AZ, NOT across AZs.** An FSx for Lustre file system lives in **one AZ**.
+- **FSx for Windows File Server can be mounted on Linux EC2 too** — not Windows-only.
+- Windows File Server: **SMB + NTFS + Active Directory**, Multi-AZ possible, **daily backup to S3**, links to on-prem via **DFS**.
+- **De-duplication = NetApp ONTAP only.** OpenZFS does **not** have it. This is the cleanest way to tell them apart.
+- **iSCSI = NetApp ONTAP.** **NFS only = OpenZFS.**
+- Both ONTAP and OpenZFS support **point-in-time instantaneous cloning** (for test/staging environments).
+- SSD vs HDD is the same logic everywhere: **SSD = low latency / random / small files; HDD = throughput / sequential / large files, cheaper.**

@@ -15,6 +15,7 @@ This section is mostly **not AWS services** — it's general data engineering th
 10. [Amazon S3 – Access Points](#10-amazon-s3--access-points) — simplifying security at scale, VPC origin
 11. [Amazon S3 – Object Lambda](#11-amazon-s3--object-lambda) — transform objects on the way out
 12. [Amazon FSx](#12-amazon-fsx) — Windows File Server, **Lustre (ML/HPC)**, NetApp ONTAP, OpenZFS
+13. [Kinesis Data Streams](#13-kinesis-data-streams) — real-time streaming, shards, capacity modes
 
 > Note: only the lectures I didn't already know are written up here, so the numbering follows my notes, not the course's lecture numbers.
 
@@ -1404,6 +1405,119 @@ A managed **OpenZFS** file system on AWS.
 ---
 ---
 
+# 13. Kinesis Data Streams
+
+A service to **collect and store streaming data in real-time**.
+
+> 🔑 **The exam keyword is REAL-TIME.** See "real-time" → think Kinesis Data Streams.
+
+## 13.1 What "real-time data" means
+
+Data that is **created and used on the spot**:
+- **Clickstream** — users clicking on a website
+- **IoT devices** — e.g. a connected bicycle sending readings
+- **Metrics and logs** from servers that you want to use immediately
+
+## 13.2 The shape of the system
+
+```
+   PRODUCERS                 KINESIS DATA STREAMS              CONSUMERS
+ ┌──────────────┐                                        ┌──────────────────┐
+ │ Applications │──┐                                  ┌──│ Your application │
+ │ (your code)  │  │     ┌─────────────────────┐      │  └──────────────────┘
+ └──────────────┘  ├────►│  shard 1            │      │  ┌──────────────────┐
+ ┌──────────────┐  │     │  shard 2   ...      │──────┼──│ Lambda           │
+ │ Kinesis Agent│──┘     │  (data retained)    │      │  └──────────────────┘
+ │ (on servers) │        └─────────────────────┘      │  ┌──────────────────┐
+ └──────────────┘                                     ├──│ Amazon Data      │
+                                                      │  │ Firehose         │
+                                                      │  └──────────────────┘
+                                                      │  ┌──────────────────┐
+                                                      └──│ Managed Service  │
+                                                         │ for Apache Flink │
+                                                         └──────────────────┘
+```
+
+**Producers** — things that send data in:
+- **Applications** — code you write to pull data from your website/devices and push it in
+- **Kinesis Agent** — installed on servers, ships metrics and logs for you (no code needed)
+
+**Consumers** — things that read data out:
+- Your own application (code you write)
+- **Lambda** functions
+- **Amazon Data Firehose**
+- **Managed Service for Apache Flink** (analytics on the stream)
+
+## 13.3 Key features
+
+| Feature | Detail |
+|---|---|
+| **Retention** | Up to **365 days** |
+| **Replay / reprocess** | ✅ Yes — because the data is **persisted**, consumers can re-read it |
+| **Deletion** | ❌ **You CANNOT delete data.** You must wait for it to expire |
+| **Max record size** | **1 MB** per record *(see note below)* |
+| **Typical use** | **Lots of small real-time records** |
+| **Ordering** | Records with the **same partition ID** are kept **in order** |
+| **Encryption** | **KMS at rest**, **HTTPS in flight** |
+
+> **On ordering:** the partition ID is how you say *"these records are related and must stay in sequence"* — e.g. all events for one user ID, or one device.
+
+> ⚠️ **Check this number:** the lecture says records up to **10 MB**. The documented Kinesis Data Streams limit is **1 MB per record**. (10 MB is the *Managed Service for Apache Flink* / other context.) Go with **1 MB** unless your course material insists otherwise — but flag it if a practice question disagrees.
+
+### Libraries for optimised applications
+
+| Library | For |
+|---|---|
+| **KPL** — Kinesis **Producer** Library | Writing a **high-throughput producer** |
+| **KCL** — Kinesis **Client** Library | Writing an optimised **consumer** |
+
+> Easy to mix up: **P**roducer = **KPL** (writes in). **C**lient = **KCL** (reads out).
+
+## 13.4 Capacity modes — the two options
+
+### Provisioned mode
+
+**You choose the number of shards.** A **shard** is the unit of capacity — "how big your stream is". You can have 1 shard or 1,000.
+
+**Per-shard limits (memorise these):**
+
+```
+   IN   (write):   1 MB/sec   OR   1,000 records/sec
+   OUT  (read):    2 MB/sec
+```
+
+**The worked example from the lecture:**
+
+```
+Need 10,000 records/sec or 10 MB/sec in?
+   10,000 records ÷ 1,000 per shard  =  10 shards
+   10 MB ÷ 1 MB per shard            =  10 shards
+```
+
+**You scale manually** — increase or decrease shards yourself, which means **you must monitor throughput** to know how many you need.
+
+**Billing:** pay **per shard, per hour**.
+
+### On-demand mode
+
+**No provisioning or capacity management at all.**
+
+| | Detail |
+|---|---|
+| Default capacity | **4 MB/sec** or **4,000 records/sec** |
+| Scaling | **Automatic**, based on **observed throughput over the past 30 days** |
+| Billing | **Per stream per hour** + **per GB of data in and out** |
+
+### Which one?
+
+| Situation | Mode |
+|---|---|
+| Predictable, steady throughput; want lowest cost | **Provisioned** |
+| Unpredictable or unknown traffic; don't want to manage capacity | **On-demand** |
+
+---
+---
+
 # Things to note (Section 2 exam traps)
 
 **Types of data**
@@ -1533,3 +1647,16 @@ A managed **OpenZFS** file system on AWS.
 - **iSCSI = NetApp ONTAP.** **NFS only = OpenZFS.**
 - Both ONTAP and OpenZFS support **point-in-time instantaneous cloning** (for test/staging environments).
 - SSD vs HDD is the same logic everywhere: **SSD = low latency / random / small files; HDD = throughput / sequential / large files, cheaper.**
+
+**Kinesis Data Streams**
+- 🔑 The trigger word is **"real-time"**.
+- **Retention up to 365 days**, and **data cannot be deleted** — it only expires. Expect this as a distractor ("how do we remove a record?" → you can't).
+- **Replay/reprocessing is possible** because data is persisted. This is the big advantage over Firehose, which **cannot replay**.
+- **Same partition ID → ordering guaranteed.** That's what partition keys are *for*.
+- Per shard: **1 MB/s or 1,000 records/s IN**, **2 MB/s OUT**. Note in and out are different numbers.
+- Shard arithmetic is a classic question: records-per-second ÷ 1,000 = shards needed.
+- **KPL = Producer** (write), **KCL = Client/consumer** (read). Don't swap them.
+- **Provisioned = you pick shards, you monitor, pay per shard-hour.** **On-demand = automatic, scales on the last 30 days, pay per stream-hour + data volume.**
+- On-demand default capacity: **4 MB/s or 4,000 records/s**.
+- **Kinesis Agent** = ship logs/metrics from servers **without writing producer code**.
+- Encryption: **KMS at rest, HTTPS in flight.**

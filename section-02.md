@@ -16,6 +16,9 @@ This section is mostly **not AWS services** — it's general data engineering th
 11. [Amazon S3 – Object Lambda](#11-amazon-s3--object-lambda) — transform objects on the way out
 12. [Amazon FSx](#12-amazon-fsx) — Windows File Server, **Lustre (ML/HPC)**, NetApp ONTAP, OpenZFS
 13. [Kinesis Data Streams](#13-kinesis-data-streams) — real-time streaming, shards, capacity modes
+14. [Amazon Data Firehose](#14-amazon-data-firehose) — near real-time delivery + Streams vs Firehose
+15. [Amazon MSK](#15-amazon-msk-managed-streaming-for-apache-kafka) — managed Kafka, architecture, security
+16. [⭐ Kinesis Data Streams vs Amazon MSK](#16--kinesis-data-streams-vs-amazon-msk) — the decision table
 
 > Note: only the lectures I didn't already know are written up here, so the numbering follows my notes, not the course's lecture numbers.
 
@@ -1462,7 +1465,7 @@ Data that is **created and used on the spot**:
 
 > **On ordering:** the partition ID is how you say *"these records are related and must stay in sequence"* — e.g. all events for one user ID, or one device.
 
-> ⚠️ **Check this number:** the lecture says records up to **10 MB**. The documented Kinesis Data Streams limit is **1 MB per record**. (10 MB is the *Managed Service for Apache Flink* / other context.) Go with **1 MB** unless your course material insists otherwise — but flag it if a practice question disagrees.
+> ⚠️ **The lecture says 10 MB here — that's a slip.** The real Kinesis Data Streams limit is **1 MB per record, and it's a HARD limit.** The later "Kinesis vs MSK" lecture confirms this: its whole conclusion is *"large message → rule out Kinesis, choose MSK"*, which only makes sense if Kinesis is capped at 1 MB. **Answer 1 MB.**
 
 ### Libraries for optimised applications
 
@@ -1514,6 +1517,349 @@ Need 10,000 records/sec or 10 MB/sec in?
 |---|---|
 | Predictable, steady throughput; want lowest cost | **Provisioned** |
 | Unpredictable or unknown traffic; don't want to manage capacity | **On-demand** |
+
+---
+---
+
+# 14. Amazon Data Firehose
+
+A service to **send data from sources into target destinations**. Think of it as a **delivery pipe**, not a storage system.
+
+> 🔑 **The exam keyword is NEAR REAL-TIME.** "Near real-time" → Amazon Data Firehose.
+
+> 📛 **Name change:** it used to be called **Kinesis Data Firehose**. It was renamed **Amazon Data Firehose** because it does far more than just Kinesis. Older material will use the old name — same service.
+
+## 14.1 The full flow
+
+```
+  SOURCES                    FIREHOSE                        DESTINATIONS
+                    ┌────────────────────────────┐
+ Applications/SDK ─►│                            │──► Amazon S3
+ Kinesis Agent ────►│  ① optional transform      │──► Amazon Redshift
+                    │     via Lambda             │──► Amazon OpenSearch
+ Kinesis Data   ◄───┤                            │
+   Streams     (pull)│  ② BUFFER                 │──► Datadog / Splunk /
+ CloudWatch     ◄───┤     (size or time based)   │    New Relic / MongoDB
+   Logs & Events    │                            │
+ AWS IoT        ◄───┤  ③ batch write out         │──► Custom HTTP endpoint
+                    └──────────┬─────────────────┘
+                               │
+                               ▼
+                   S3 backup bucket
+            (ALL data, or only the FAILED data)
+```
+
+**Note the two directions on the input side:** some producers **push** into Firehose (your apps via SDK, the Kinesis Agent), while Firehose **pulls** from others (Kinesis Data Streams, CloudWatch Logs & Events, AWS IoT).
+
+## 14.2 Destinations
+
+| Category | Targets |
+|---|---|
+| **AWS** | **Amazon S3**, **Amazon Redshift**, **Amazon OpenSearch** |
+| **Third-party partners** | **Datadog, Splunk, New Relic, MongoDB** |
+| **Anything else** | **Custom HTTP endpoint** |
+
+**Backup:** you can write **all data** *or* **only the failed data** to an S3 bucket.
+
+## 14.3 Why it's "near real-time" — the buffer
+
+This is the heart of the service:
+
+```
+records arrive → accumulate in a BUFFER → flushed when the buffer hits
+                                           a SIZE limit or a TIME limit
+                                        → written to the destination in a BATCH
+```
+
+Because the data waits in the buffer before being flushed, there's a delay — hence **near** real-time. (The buffer can optionally be disabled.)
+
+> Compare: Kinesis Data Streams has **no buffer**, so it's **real-time**. The buffer is the single reason Firehose is "near".
+
+## 14.4 Data formats and transformation
+
+**Accepts:** CSV, JSON, Parquet, Avro, text, binary
+
+**Firehose can do natively:**
+- **Convert** to **Parquet** or **ORC**
+- **Compress** with **gzip** or **Snappy**
+
+**For anything custom → use AWS Lambda.** Example from the lecture: converting **CSV → JSON** before writing to S3.
+
+> Pattern worth remembering: Parquet/ORC conversion and gzip/Snappy compression are **built in**. Any *other* transformation needs **Lambda**.
+
+## 14.5 Other properties
+
+| Property | Detail |
+|---|---|
+| **Management** | **Fully managed**, **fully serverless** |
+| **Scaling** | **Automatic** |
+| **Pricing** | Pay only for what you use |
+| **Data storage** | ❌ **None** |
+| **Replay** | ❌ **Not possible** |
+
+---
+
+## 14.6 ⭐ Kinesis Data Streams vs Amazon Data Firehose
+
+**This comparison is the most examinable thing in both lectures.**
+
+| | **Kinesis Data Streams** | **Amazon Data Firehose** |
+|---|---|---|
+| **What it is** | A streaming data **collection** service | **Loads** streaming data into destinations |
+| **Timing** | **Real-time** | **Near real-time** (buffer) |
+| **Code** | You usually write **your own producer and consumer** | **Fully managed** — no code |
+| **Scaling** | **Provisioned** or **on-demand** mode | **Automatic** |
+| **Data storage** | ✅ Up to **1 year** | ❌ **No storage** |
+| **Replay** | ✅ **Yes** | ❌ **No** |
+
+**The two-word memory hook:**
+
+```
+Data Streams  →  STORE it  (real-time, replayable, you write the code)
+Firehose      →  DELIVER it (near real-time, managed, fire-and-forget)
+```
+
+> The name helps: a **firehose** sprays water *somewhere else* — it doesn't hold it. Firehose **delivers and forgets**; Streams **keeps**.
+
+---
+---
+
+# 15. Amazon MSK (Managed Streaming for Apache Kafka)
+
+> **You don't need to know how to *use* Kafka.** You need to know **how MSK works, its architecture, its security, and how it differs from Kinesis.** The exam makes you **choose between Kafka and Kinesis** given a scenario.
+
+## 15.1 What MSK is
+
+> **MSK = fully managed Apache Kafka on AWS.** Think of it as a **drop-in replacement for Kinesis — but far more configurable.**
+
+You create, update and delete Kafka clusters; AWS creates and manages the **broker nodes** and **Zookeeper nodes** for you.
+
+| Property | Detail |
+|---|---|
+| **Deployment** | Inside **your VPC** (a private cluster) |
+| **High availability** | **Multi-AZ, up to 3 AZs** |
+| **Recovery** | **Automatic recovery** from common Kafka failures |
+| **Storage** | Data stored on **EBS volumes** |
+
+## 15.2 Architecture — deliberately similar to Kinesis
+
+```
+  PRODUCERS                MSK CLUSTER                     CONSUMERS
+ (your code)         ┌──────────────────────┐             (your code)
+                     │  Broker 1            │
+ from Kinesis ──────►│  Broker 2   ← data   │──────────►  EMR
+ from IoT     ──────►│  Broker 3    replicated          ►  S3
+ from RDS     ──────►│                      │          ►  SageMaker
+ from anywhere      │  Kafka TOPICS        │          ►  Kinesis
+                     │  (replicated across  │          ►  RDS
+                     │   AZs = data safety) │          ►  ...
+                     └──────────────────────┘
+```
+
+- **Producers** write into a **Kafka topic**
+- **Topics are replicated** across AZs → that's what keeps the data safe
+- **Consumers poll from topics**, then process the data or forward it onward
+
+> It's structurally the same as Kinesis. **What differs: the APIs, the tooling, and how configurable it is.** Kafka's configurability is what lets you get around Kinesis's limits.
+
+## 15.3 ⭐ The message size difference — a likely exam question
+
+| | **Kinesis Data Streams** | **Amazon MSK / Kafka** |
+|---|---|---|
+| Default message size | **1 MB — a HARD limit** | **1 MB by default** |
+| Can it be raised? | ❌ **No** | ✅ **Yes** — configure up to **10 MB** or more |
+
+> 🔑 **If the question says "we need to send messages larger than 1 MB" → MSK/Kafka, not Kinesis.** Kinesis's 1 MB is a hard ceiling; Kafka's is just a default you can change.
+
+## 15.4 Cluster configuration choices
+
+| Choice | Detail |
+|---|---|
+| **Number of AZs** | **3 recommended**, or 2 |
+| **VPC and subnets** | It's a private cluster |
+| **Broker instance type** | e.g. `m5.large` |
+| **Brokers per AZ** | You pick, and **can add brokers over time** |
+| **EBS volume size** | **1 GB to 16 TB** — this controls **how long you can retain data** |
+
+**You get one Zookeeper per AZ.** The lecture's example:
+
+```
+3 AZs  ×  2 brokers per AZ   =   6 Kafka brokers  +  3 Zookeeper nodes
+```
+
+> The large EBS range (up to 16 TB) means **retention is limited by disk, not a fixed policy** — more flexible than Kinesis Data Streams' 365-day cap.
+
+## 15.5 ⭐ MSK Security — "this will be asked at the exam"
+
+### Encryption
+
+| Where | Detail |
+|---|---|
+| **Between brokers** (in-flight) | **TLS** — **enabled by default**, *can be disabled* for performance |
+| **Between client and broker** (in-flight) | **TLS** — **enabled by default**, *can be disabled* for performance |
+| **At rest** | **EBS volumes encrypted with KMS** |
+
+### Network security
+Attach **security groups** to your Kafka clients to control network access between brokers and EC2 instances.
+
+### Authentication & Authorization — the key table
+
+This decides **who can read and write which topics**. Three mechanisms:
+
+| Mechanism | Authentication | Authorization |
+|---|---|---|
+| **Mutual TLS (mTLS)** | TLS certificates used for **both encryption and authentication** | **Kafka ACLs** |
+| **SASL/SCRAM** | Simply put: **username + password** | **Kafka ACLs** |
+| **IAM Access Control** | **IAM policies** | **IAM policies** — does **both** |
+
+> 🔑 **The fact the lecture calls out explicitly:**
+> **Kafka ACLs (used by mTLS and SASL/SCRAM) CANNOT be managed with IAM policies.** They must be defined **inside the Kafka cluster itself**.
+
+> **IAM Access Control is the only one that handles authentication AND authorization together** — which is what you'd get natively with Kinesis Data Streams.
+
+## 15.6 Monitoring
+
+**CloudWatch Metrics — three levels:**
+
+| Level | What you get |
+|---|---|
+| **Basic monitoring** | Cluster and **broker-level** metrics |
+| **Enhanced monitoring** | More **broker** metrics |
+| **Topic-level monitoring** | Enhanced **topic-level** metrics (per data stream in the cluster) |
+
+**Prometheus** — open-source monitoring, extract metrics via the **JMX Exporter** or **Node Exporter**.
+
+**Broker log delivery** → to **CloudWatch Logs**, **Amazon S3**, or **Kinesis Data Streams**.
+
+## 15.7 MSK Connect
+
+### First, what is Kafka Connect?
+
+In the Kafka world, **Kafka Connect** is a **framework for moving data in and out of Kafka**:
+
+```
+   somewhere else  ──► Kafka      (source connector)
+   Kafka ──► somewhere else       (sink connector)
+```
+
+### What MSK Connect adds
+
+> **MSK Connect = managed Kafka Connect workers on AWS, with auto-scaling.**
+
+You don't build or run the Kafka Connect infrastructure yourself. AWS runs the **workers**; you just **deploy a connector as a plugin** and configure it.
+
+**Available plugins include:** Amazon **S3**, Amazon **Redshift**, Amazon **OpenSearch**, **Debezium** (change data capture), and others.
+
+### The example flow
+
+```
+┌──────────────┐      ┌─────────────────────┐      ┌──────────────┐
+│  MSK Cluster │─────►│  MSK Connect        │─────►│  Amazon S3   │
+│  (topics)    │ pull │  workers            │write │              │
+└──────────────┘      │  + S3 Kafka         │      └──────────────┘
+                      │    Connector plugin │
+                      └─────────────────────┘
+                   no infrastructure managed by you —
+                   it's all configuration
+```
+
+1. MSK cluster is running
+2. MSK Connect creates the **Connect workers** for you
+3. You deploy the **Amazon S3 Kafka Connector** plugin
+4. Workers **pull topic data** from the cluster and **write it to S3**
+
+**Pricing:** roughly **$0.11 per worker per hour** — more data means more workers.
+
+> This is an **introduction-level topic** — just recognise what MSK Connect is if it appears in a question.
+
+## 15.8 MSK Serverless
+
+Normal MSK = **you provision a cluster and pay per hour**.
+
+> **MSK Serverless = run Apache Kafka on MSK without managing capacity.** AWS **automatically provisions resources and scales compute and storage**.
+
+**What you have to do** — that's the whole appeal:
+
+```
+Define your topics  +  how many partitions per topic   →  done
+```
+
+No broker instance types, no broker counts, no EBS sizing.
+
+**Security:** **IAM Access Control for all clusters.**
+
+### Pricing model (different shape from provisioned MSK)
+
+| You pay for | Approximate rate |
+|---|---|
+| **Per cluster, per hour** | ~$0.75/hour → **~$558 per cluster per month** |
+| **Per partition, per hour** | ~**$1 per partition per month** |
+| **Storage** | per GB |
+| **Data in / data out** | per GB |
+
+> The point isn't the exact numbers — it's that the **pricing model is structured differently** (cluster + partitions + data, instead of brokers + EBS). For some workloads that model simply works out better.
+
+### Provisioned MSK vs MSK Serverless
+
+| | **Provisioned MSK** | **MSK Serverless** |
+|---|---|---|
+| Capacity | **You choose** brokers, instance types, EBS size | **Automatic** |
+| Scaling | You add brokers over time | **Automatic** (compute + storage) |
+| You define | The whole cluster | Just **topics and partitions** |
+| Security | mTLS / SASL-SCRAM / IAM | **IAM Access Control** |
+| Billing | Per broker-hour + storage | Per cluster-hour + partition-hour + storage + data |
+
+---
+---
+
+# 16. ⭐ Kinesis Data Streams vs Amazon MSK
+
+## 16.1 The strategy first
+
+> **Default to Kinesis Data Streams** — AWS prefers you to use their own product, so it's the answer most of the time.
+>
+> **But know the one or two edge cases where MSK is correct.** That's what this comparison is for.
+
+## 16.2 The comparison table
+
+| | **Kinesis Data Streams** | **Amazon MSK** |
+|---|---|---|
+| **Max message size** | **1 MB — hard limit** | **1 MB by default, configurable higher** (e.g. 10 MB) |
+| **Unit of parallelism** | **Shards** | **Partitions** (inside Kafka **topics**) |
+| **Scaling up** | **Shard splitting** | **Add partitions** to a topic |
+| **Scaling down** | **Shard merging** ✅ | ❌ **Cannot remove partitions** |
+| **In-flight encryption** | **TLS — always on** | **Choose: plaintext OR TLS** |
+| **At-rest encryption** | **KMS** | **KMS** |
+| **Auth & authorization** | **IAM policies** (both) | Pick one of three: see below |
+
+**MSK's three security combos:**
+
+| # | Authentication | Authorization |
+|---|---|---|
+| 1 | **Mutual TLS** | **Kafka ACLs** |
+| 2 | **SASL/SCRAM** | **Kafka ACLs** |
+| 3 | **IAM Access Control** | **IAM Access Control** (does both) |
+
+## 16.3 🔑 The decision rule that matters most
+
+```
+  Message larger than 1 MB?
+         │
+         ├── YES ──►  Amazon MSK
+         │            (rules out Kinesis Data Streams AND Firehose)
+         │
+         └── NO  ──►  Kinesis Data Streams (the usual answer)
+```
+
+> **This is the single highest-value fact in the lecture.** If you see a **large message** in a question, it **eliminates every Kinesis Data Streams and Firehose option immediately** — go straight to MSK.
+
+## 16.4 Two other differences worth noticing
+
+**1. Scaling is easier in Kinesis.**
+Kinesis can **split *and* merge** shards — throughput goes up *and* down. MSK can only **add** partitions, never remove them. So "we need to scale throughput down" leans Kinesis.
+
+**2. Kinesis always encrypts in flight; MSK lets you turn it off.**
+TLS is mandatory in Kinesis. In MSK, plaintext is an available choice (and MSK lets you disable TLS for performance). So "encryption in transit must always be enforced with no option to disable" leans Kinesis.
 
 ---
 ---
@@ -1660,3 +2006,47 @@ Need 10,000 records/sec or 10 MB/sec in?
 - On-demand default capacity: **4 MB/s or 4,000 records/s**.
 - **Kinesis Agent** = ship logs/metrics from servers **without writing producer code**.
 - Encryption: **KMS at rest, HTTPS in flight.**
+
+**Amazon Data Firehose**
+- 🔑 **"Near real-time" → Firehose.** **"Real-time" → Kinesis Data Streams.** This single pair decides a lot of questions.
+- The **buffer** (size-based or time-based) is *why* it's near real-time. No buffer in Data Streams.
+- **Renamed** from *Kinesis* Data Firehose → *Amazon* Data Firehose. Both names mean the same service.
+- **No data storage, no replay.** If a question needs reprocessing of old records, Firehose is **wrong** — use Data Streams.
+- Destinations to memorise: **S3, Redshift, OpenSearch** + **Datadog, Splunk, New Relic, MongoDB** + **custom HTTP endpoint**.
+- Firehose can **pull from** Kinesis Data Streams, CloudWatch Logs/Events and IoT — producers don't always push.
+- **Built in: convert to Parquet/ORC, compress with gzip/Snappy.** Anything else (e.g. **CSV → JSON**) needs **Lambda**.
+- Can back up **all** records or **only failed** records to S3.
+- Fully **serverless and auto-scaling** → the answer when the question says **"least operational overhead"** for delivering streaming data.
+- Memory hook: a firehose **sprays water elsewhere, it doesn't hold it** — delivers and forgets.
+
+**Amazon MSK**
+- 🔑 **Messages larger than 1 MB → MSK/Kafka.** Kinesis's **1 MB is a HARD limit**; Kafka's 1 MB is a **configurable default** (can go to 10 MB+).
+- MSK = **fully managed Kafka**, deployed **in your VPC**, **multi-AZ up to 3**, data on **EBS (1 GB – 16 TB)**.
+- AWS manages **both broker nodes and Zookeeper nodes**.
+- **One Zookeeper per AZ.** Do the arithmetic: 3 AZs × 2 brokers = **6 brokers + 3 Zookeepers**.
+- Retention is governed by **EBS volume size**, not a fixed limit — more flexible than Kinesis's 365 days.
+- **Security is explicitly flagged as examinable.** Learn the three auth mechanisms:
+  - **mTLS** → certificates for auth, **Kafka ACLs** for authorization
+  - **SASL/SCRAM** → username+password, **Kafka ACLs** for authorization
+  - **IAM Access Control** → IAM policies do **BOTH** auth and authorization
+- ⚠️ **Kafka ACLs cannot be managed by IAM policies** — they live **inside the Kafka cluster**. Classic trap answer.
+- TLS in-flight (broker↔broker and client↔broker) is **on by default but CAN be disabled** for performance. KMS encrypts EBS at rest.
+- Monitoring tiers: **Basic (cluster+broker) → Enhanced (more broker) → Topic-level.** Plus **Prometheus** (JMX/Node Exporter).
+- Broker logs can go to **CloudWatch Logs, S3, or Kinesis Data Streams**.
+- **MSK Connect** = **managed Kafka Connect workers**, auto-scaling, no infrastructure to run. You deploy a **connector plugin** (S3, Redshift, OpenSearch, **Debezium**) and configure it.
+- Kafka Connect moves data **into or out of** Kafka — remember it works **both directions** (source and sink).
+- Billed **per worker per hour** (~$0.11).
+- **MSK Serverless** = Kafka with **no capacity management** — AWS scales compute and storage. You only define **topics and partitions**.
+- MSK Serverless uses **IAM Access Control** for security.
+- Billing shape differs: **per cluster-hour + per partition-hour + storage + data in/out** (vs per-broker for provisioned).
+- Cue words: **"don't want to manage capacity" / "unpredictable Kafka workload" → MSK Serverless.** "Need full control / custom tuning" → provisioned MSK.
+
+**Kinesis Data Streams vs MSK**
+- 🔑 **Large message (>1 MB) → MSK.** It eliminates **both** Kinesis Data Streams **and** Firehose answers at once. Highest-value rule in this topic.
+- **Default to Kinesis Data Streams** otherwise — AWS favours its own service, and it's the answer in most scenarios.
+- **Kinesis = shards. MSK = partitions (in topics).** Same concept, different vocabulary.
+- **Kinesis can split AND merge shards** (scale up and down). **MSK can only ADD partitions — never remove them.** "Scale throughput down" leans Kinesis.
+- **Kinesis TLS in-flight is always on.** **MSK lets you choose plaintext or TLS.** "Encryption must always be enforced" leans Kinesis.
+- Both use **KMS at rest**.
+- **Kinesis auth = IAM policies, full stop.** MSK makes you pick one of **three combos** (mTLS+ACLs / SASL-SCRAM+ACLs / IAM for both).
+- ⚠️ In this lecture the instructor **misspeaks and says Kinesis allows 10 MB** — his own conclusion contradicts it. **Kinesis is 1 MB, hard.**
